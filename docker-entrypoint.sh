@@ -1,6 +1,12 @@
 #!/bin/sh
 set -e
 
+# Root degilsek (ornegin platform bu betigi bir kez daha zincirlediyse)
+# sahiplik duzeltmeye ve kullanici degistirmeye gerek yok: dogrudan calistir.
+if [ "$(id -u)" != "0" ]; then
+  exec "$@"
+fi
+
 # Railway diski root'a ait olarak baglanir; uygulama root DEGIL calisiyor.
 # Sahiplik duzeltilmezse SQLite ilk yazmada EACCES alir ve sunucu, veritabani
 # yokmus gibi degil, ANLASILMAZ bir hatayla oler.
