@@ -1,0 +1,262 @@
+/* Bide — tasarim sistemi.
+ *
+ * Tasarim dosyalarindaki satir ici stiller buraya cikarildi. Sebep tekrar
+ * degil: bes sayfa ayni degerleri tasiyor ve biri degistiginde hepsinin
+ * degismesi gerekiyor. Satir ici birakmak, dorduncude unutmak demekti. */
+
+@import url('https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500;600&display=swap');
+
+/* Ana sayfanin (landing.css) dili butun sayfalarda: sicak koyu zemin,
+   Geist grotesk, tek turuncu vurgu, yuvarlak hap dugmeler. Eski serif +
+   izgara gorunumu ilk taslaktan kalmaydi. */
+:root {
+  --bg:        #0b0b0c;
+  --bg-2:      #131314;
+  --bg-3:      #1a1a1c;
+  --bg-deep:   #08080a;
+  --bg-deeper: #060607;
+  --ink:       #f7f7f5;
+  --ink-soft:  #dededb;
+  --ink-2:     #a3a3a0;
+  --muted:     #8a8a87;
+  --faint:     #6a6a67;
+  --dim:       #4c4c4a;
+  --line:      rgba(247, 247, 245, 0.07);
+  --line-2:    rgba(247, 247, 245, 0.12);
+  --line-3:    rgba(247, 247, 245, 0.18);
+  --accent:    oklch(0.72 0.19 45);
+  --accent-hi: oklch(0.8 0.17 50);
+  --accent-bg: oklch(0.72 0.19 45 / 0.06);
+  --warn:      #b8574a;
+  --good:      #8fae7f;
+
+  --sans:  'Geist', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  /* Eski ad; sayfalardaki satir ici `var(--serif)` artik grotesk basliga gider. */
+  --serif: var(--sans);
+  --mono:  'Geist Mono', ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 16px; line-height: 1.5; letter-spacing: -0.005em;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+  overflow-x: hidden;
+}
+
+a { color: var(--ink); text-decoration: none; }
+a:hover { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+::selection { background: oklch(0.72 0.19 45 / 0.3); }
+
+.mono { font-family: var(--mono); }
+.wrap { max-width: 1240px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 48px); }
+.wrap-narrow { max-width: 720px; margin: 0 auto; padding: 0 clamp(16px, 4vw, 40px); }
+.hidden { display: none !important; }
+
+/* ── ust cubuk ── */
+.top {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 16px; padding: 12px clamp(16px, 4vw, 48px);
+  background: rgba(11, 11, 12, 0.8);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.brand { display: flex; align-items: center; gap: 8px; font-family: var(--sans); font-weight: 600; font-size: 16px; letter-spacing: -0.02em; }
+.brand .star { color: var(--accent); font-size: 17px; }
+/* ✶ karakterinin kollari dikey; logo (ASCII yildiz) yatay kollu — 90° cevir. */
+.brand .star { display: inline-block; transform: rotate(90deg); }
+.nav { display: flex; align-items: center; gap: clamp(14px, 2.2vw, 28px); font-family: var(--sans); font-size: 14px; color: var(--ink-2); }
+.nav a { color: var(--ink-2); transition: color 150ms; }
+.nav a:hover { color: var(--ink); }
+.nav a.cta {
+  display: inline-flex; align-items: center; height: 32px; padding: 0 14px; border-radius: 999px;
+  background: var(--ink); color: var(--bg); font-weight: 500; transition: background 150ms;
+}
+.nav a.cta:hover { background: #fff; color: var(--bg); }
+.chip {
+  display: inline-flex; align-items: center; gap: 8px; height: 26px;
+  padding: 0 11px; border: 1px solid var(--line-2);
+  border-radius: 999px; font-family: var(--mono); font-size: 12px; color: var(--ink-2); white-space: nowrap;
+}
+.chip .dot { width: 6px; height: 6px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px oklch(0.72 0.19 45 / 0.18); }
+
+/* ── tipografi ── */
+h1, h2, h3 { font-family: var(--sans); font-weight: 500; letter-spacing: -0.03em; margin: 0; text-wrap: balance; }
+h1 { font-size: clamp(30px, 4.4vw, 52px); line-height: 1.05; letter-spacing: -0.035em; }
+.h-hero { font-size: clamp(36px, 5.6vw, 68px); line-height: 1.04; letter-spacing: -0.035em; max-width: 20ch; }
+h2 { font-size: clamp(24px, 3vw, 36px); line-height: 1.1; }
+h3 { font-size: clamp(18px, 2vw, 22px); line-height: 1.25; letter-spacing: -0.02em; }
+em.hl { font-style: normal; color: var(--accent); }
+.eyebrow {
+  font-family: var(--mono); font-size: 13px; letter-spacing: 0;
+  text-transform: lowercase; color: var(--muted); margin: 0 0 18px;
+  display: flex; align-items: center; gap: 10px;
+}
+.eyebrow::before { content: '✶'; color: var(--accent); }
+.lead { font-family: var(--sans); font-size: 16px; line-height: 1.6; color: var(--ink-2); text-wrap: pretty; max-width: 58ch; }
+.body { font-family: var(--sans); font-size: 15px; line-height: 1.6; color: var(--muted); text-wrap: pretty; }
+.small { font-family: var(--sans); font-size: 13.5px; line-height: 1.6; color: var(--faint); }
+.statement { font-size: clamp(19px, 2.3vw, 26px); line-height: 1.45; letter-spacing: -0.02em; color: var(--ink-soft); text-wrap: pretty; max-width: 62ch; }
+
+section { border-top: 1px solid var(--line); padding: clamp(40px, 6vw, 72px) 0; }
+section:first-of-type { border-top: 0; }
+
+/* ── terminal ── */
+.term {
+  border: 1px solid rgba(247, 247, 245, 0.1); border-radius: 10px; background: rgba(16, 16, 17, 0.94); overflow: hidden; margin: 0;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 30px 60px -28px rgba(0, 0, 0, 0.7);
+}
+.term-bar {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 10px 14px; border-bottom: 1px solid rgba(247, 247, 245, 0.1);
+  font-family: var(--mono); font-size: 12px; color: var(--faint);
+}
+.term-body { padding: 20px 16px 0; font-family: var(--mono); font-size: clamp(12px, 1.35vw, 14.5px); line-height: 1.85; }
+.term-status {
+  border-top: 1px solid rgba(247, 247, 245, 0.1); background: var(--bg-deeper);
+  padding: 12px 16px; min-height: 46px;
+  display: flex; align-items: center; justify-content: space-between; gap: 18px;
+  font-family: var(--mono); font-size: clamp(11.5px, 1.3vw, 14px);
+}
+/* Reklam satirinin KENDISI. Yuvarlak kose, gradyan, golge YOK — ekrana
+   basilan seyin aynisi olmak zorunda. */
+.ad { display: flex; align-items: baseline; gap: 8px; min-width: 0; transition: opacity 260ms linear; }
+.ad-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.ad .brand-name { font-weight: 600; color: var(--ink); }
+.ad .sep { color: var(--muted); }
+.ad .cta { color: var(--faint); }
+.ad-right { color: var(--dim); white-space: nowrap; }
+
+/* ── dugmeler ── */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 12px;
+  height: 44px; padding: 0 20px; border: 1px solid var(--line-2); border-radius: 999px;
+  background: transparent; color: var(--ink);
+  font-family: var(--sans); font-size: 14.5px; font-weight: 500; cursor: pointer;
+  -webkit-appearance: none; appearance: none;
+  transition: background 150ms, border-color 150ms, color 150ms;
+}
+.btn:hover { border-color: rgba(247, 247, 245, 0.32); }
+.btn-primary { background: var(--ink); border-color: var(--ink); color: var(--bg); }
+.btn-primary:hover { background: #fff; border-color: #fff; color: var(--bg); }
+.btn-quiet { background: transparent; }
+/* Kopyalanan komut: komut oldugu belli olsun, mono kalir. */
+.btn-cmd { font-family: var(--mono); font-weight: 400; font-size: 13px; border-radius: 8px; background: var(--bg-3); border-color: var(--line); }
+.btn-sm { height: 34px; padding: 0 14px; font-size: 13.5px; }
+.btn:disabled { opacity: 0.45; cursor: not-allowed; border-color: var(--line-2); }
+.btn-primary:disabled { background: rgba(247, 247, 245, 0.09); border-color: transparent; color: var(--faint); }
+.btn .tag {
+  color: var(--accent); font-family: var(--mono); font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase;
+  /* Genislik sabit: "copy" → "✓" degisiminde dugme ziplamasin. */
+  min-width: 3.4em; text-align: center; display: inline-block;
+}
+.btn .tag.done { display: inline-flex; align-items: center; justify-content: center; }
+
+/* Cizilen tik. `stroke-dasharray` ile kendini ciziyor — onay bir olay,
+   aniden belirmek yerine olmasi daha dogru hissettiriyor. */
+.tick {
+  width: 18px; height: 18px; display: block;
+  fill: none; stroke: currentColor;
+  stroke-width: 2.2; stroke-linecap: round; stroke-linejoin: round;
+}
+.tick path { stroke-dasharray: 18; stroke-dashoffset: 18; animation: tick-draw 260ms ease-out forwards; }
+@keyframes tick-draw { to { stroke-dashoffset: 0; } }
+@media (prefers-reduced-motion: reduce) { .tick path { stroke-dashoffset: 0; animation: none; } }
+.btn-primary .tag { color: var(--bg); }
+.link-under { font-family: var(--sans); font-size: 14px; color: var(--muted); border-bottom: 1px solid var(--line-3); padding-bottom: 2px; }
+.link-under:hover { color: var(--ink); }
+
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner {
+  width: 12px; height: 12px; border-radius: 50%;
+  border: 1.5px solid rgba(11, 11, 12, 0.35); border-top-color: var(--bg);
+  display: inline-block; animation: spin 700ms linear infinite; flex: none;
+}
+@keyframes pulse { 0%, 100% { opacity: 0.35 } 50% { opacity: 1 } }
+.pulse { animation: pulse 1.6s ease-in-out infinite; }
+
+/* ── kutular ── */
+.card { border: 1px solid var(--line); border-radius: 10px; background: var(--bg-2); padding: clamp(20px, 3.5vw, 32px); }
+.note { border: 1px solid var(--line-2); border-left: 2px solid var(--muted); border-radius: 6px; padding: 14px 16px; font-family: var(--sans); font-size: 14px; line-height: 1.6; color: var(--ink-soft); }
+.note-accent { border-left-color: var(--accent); }
+.note-warn { border-left-color: var(--warn); }
+.banner {
+  border: 1px solid oklch(0.72 0.19 45 / 0.5); border-left: 3px solid var(--accent);
+  border-radius: 10px; background: var(--accent-bg); padding: clamp(18px, 3vw, 26px);
+}
+.grid-1px { display: grid; gap: 1px; background: var(--line-2); border: 1px solid var(--line-2); border-radius: 10px; overflow: hidden; }
+.grid-1px > * { background: var(--bg); }
+.two { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: clamp(18px, 3vw, 40px); align-items: start; }
+
+code, .code {
+  font-family: var(--mono); font-size: 13px; color: var(--ink);
+  border: 1px solid var(--line-2); border-radius: 6px;
+  padding: 11px 14px; background: var(--bg-deep);
+  word-break: break-all; line-height: 1.7; display: block;
+}
+
+/* ── tablo ── */
+.table-wrap { overflow-x: auto; }
+table { width: 100%; min-width: 520px; border-collapse: collapse; font-family: var(--mono); font-size: 13px; }
+th {
+  text-align: left; font-weight: 400; font-size: 11.5px; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--dim);
+  padding: 0 16px 10px 0; border-bottom: 1px solid rgba(247, 247, 245, 0.11);
+}
+td { padding: 13px 16px 13px 0; border-bottom: 1px solid rgba(247, 247, 245, 0.06); color: var(--muted); }
+td.num { text-align: right; color: var(--ink); white-space: nowrap; }
+
+/* ── formlar ── */
+label.field { display: grid; gap: 8px; font-family: var(--sans); font-size: 13px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--ink-2); }
+input[type="text"], input[type="number"], input[type="password"], input[type="search"], select, textarea {
+  padding: 11px 13px; border: 1px solid var(--line-2); border-radius: 8px;
+  background: var(--bg-deep); color: var(--ink);
+  font-family: var(--mono); font-size: 14px; text-transform: none; letter-spacing: 0; width: 100%;
+}
+input[type="text"]:focus, input[type="number"]:focus, input[type="password"]:focus, select:focus, textarea:focus { outline: none; border-color: oklch(0.72 0.19 45 / 0.7); }
+input.bad { border-color: oklch(0.72 0.19 45 / 0.6); }
+.err { margin: 8px 0 0; font-family: var(--sans); font-size: 13.5px; line-height: 1.55; color: var(--accent); }
+
+/* ── ilerleme ── */
+.bar { height: 3px; background: rgba(247, 247, 245, 0.1); border-radius: 2px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); transition: width 400ms ease; }
+
+/* ── altlik ── */
+footer { border-top: 1px solid var(--line); }
+footer .wrap, footer .wrap-narrow {
+  padding-top: 26px; padding-bottom: 26px;
+  display: flex; flex-wrap: wrap; gap: 12px 28px;
+  align-items: center; justify-content: space-between;
+  font-family: var(--sans); font-size: 13.5px; color: var(--faint);
+}
+footer a { color: var(--faint); }
+footer a:hover { color: var(--ink); }
+
+/* ── buyuk rakam ── */
+.figure { font-family: var(--mono); font-size: clamp(36px, 6.5vw, 68px); line-height: 1; letter-spacing: -0.035em; color: var(--ink); }
+.figure-label { font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin: 0 0 4px; }
+
+/* ── cuzdan secici (app.js `pickWallet`) ── */
+dialog.wallet-picker { background: var(--bg-2); color: var(--ink); border: 1px solid var(--line-2); border-radius: 12px; padding: 22px; width: min(360px, calc(100vw - 32px)); }
+dialog.wallet-picker::backdrop { background: rgba(0, 0, 0, 0.6); }
+.wallet-picker .wp-title { font-family: var(--mono); font-size: 12px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--accent); margin: 0 0 14px; }
+.wallet-picker .wp-list { display: grid; gap: 8px; }
+.wallet-picker .wp-item { display: flex; align-items: center; gap: 12px; width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--bg-3); color: var(--ink); font: inherit; font-size: 14.5px; cursor: pointer; text-align: left; }
+.wallet-picker .wp-item:hover { border-color: var(--accent); }
+.wallet-picker .wp-item img { width: 26px; height: 26px; border-radius: 6px; flex: none; }
+.wallet-picker .wp-item em { margin-left: auto; font-style: normal; font-size: 11.5px; color: var(--faint); }
+.wallet-picker .wp-item.off { opacity: 0.55; }
+.wallet-picker .wp-cancel { margin-top: 14px; background: none; border: 0; color: var(--muted); font: inherit; font-size: 13px; cursor: pointer; padding: 4px 0; }

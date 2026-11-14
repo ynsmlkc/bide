@@ -1,0 +1,51 @@
+{
+  "name": "bidesh",
+  "version": "0.1.20",
+  "description": "Earn USDC on NEAR while your AI coding agent thinks. One sponsored status line, paid per verified impression.",
+  "keywords": [
+    "claude-code",
+    "statusline",
+    "ads",
+    "near",
+    "near-protocol",
+    "usdc",
+    "cli",
+    "terminal"
+  ],
+  "license": "MIT",
+  "author": "ynsmlkc",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ynsmlkc/Bide.git"
+  },
+  "homepage": "https://github.com/ynsmlkc/Bide#readme",
+  "bugs": {
+    "url": "https://github.com/ynsmlkc/Bide/issues"
+  },
+  "type": "module",
+  "bin": {
+    "bide": "dist/bide.mjs"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit",
+    "build": "node build.mjs",
+    "prepack": "node build.mjs"
+  },
+  "devDependencies": {
+    "@bide/payments": "workspace:*",
+    "@bide/protocol": "workspace:*",
+    "@near-js/crypto": "2.5.1",
+    "@near-js/signers": "2.5.1",
+    "@types/node": "^26.2.0",
+    "esbuild": "^0.28.2"
+  }
+}

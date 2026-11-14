@@ -1,0 +1,347 @@
+import { describe, it, expect, beforeEach } from 'vitest'
+import { fixedClock, fakeIdGenerator, cryptoIdGenerator, micros, type Micros } from '@bide/protocol'
+import { AdSelector, type Campaign } from '../src/ads/selector.js'
+
+const camp = (id: string, cpmUsdc: number, over: Partial<Campaign> = {}): Campaign => ({
+  id, advertiserId: `adv-${id}`,
+  bidCpm: micros(BigInt(Math.round(cpmUsdc * 1_000_000))),
+  revShareBps: 5000,
+  creative: { brand: id, text: 'metin' },
+  status: 'active', frequencyCap: 0,
+  ...over,
+})
+
+function setup(
+  campaigns: Campaign[],
+  balances: Record<string, bigint> = {},
+  spentToday: Record<string, bigint> = {},
+) {
+  const clock = fixedClock(1_700_000_000_000)
+  const sel = new AdSelector({
+    clock, ids: fakeIdGenerator('n'),
+    campaigns: () => campaigns,
+    spendableBalance: (a) => micros(balances[a] ?? 1_000_000_000n),
+    spentToday: (id) => micros(spentToday[id] ?? 0n),
+  })
+  return { sel, clock }
+}
+
+describe('ADR-009 — teklif sirali secim', () => {
+  it('en yuksek teklif servis edilir', () => {
+    const { sel } = setup([camp('dusuk', 10), camp('yuksek', 30)])
+    expect(sel.select('p1')!.campaign.id).toBe('yuksek')
+  })
+
+  it('fiyat CPM/1000 — kalan platform lehine atilir', () => {
+    // Rakip $2.001 → kazanan $2.011/blok oder → 2_011 micro/gosterim (kesirsiz).
+    const { sel } = setup([
+      camp('a', 0, { bidCpm: micros(3_000_000n) }),
+      camp('b', 0, { bidCpm: micros(2_001_000n) }),
+    ])
+    expect(sel.select('p1')!.rate).toBe(2_011n)
+  })
+
+  it('pasif ve askiya alinmis kampanyalar servis edilmez', () => {
+    const { sel } = setup([
+      camp('a', 30, { status: 'paused' }),
+      camp('b', 20, { status: 'suspended' }),
+      camp('c', 10),
+    ])
+    expect(sel.select('p1')!.campaign.id).toBe('c')
+  })
+
+  it('gosterim basina orani sifira dusen kampanya elenir', () => {
+    // CPM 999 micro → 999/1000 = 0. Satacak bir sey yok.
+    const { sel } = setup([camp('kucuk', 0, { bidCpm: micros(999n) }), camp('normal', 10)])
+    expect(sel.select('p1')!.campaign.id).toBe('normal')
+  })
+
+  it('hic uygun kampanya yoksa null — bos reklam gosterilmez', () => {
+    const { sel } = setup([])
+    expect(sel.select('p1')).toBeNull()
+  })
+})
+
+describe('ADR-021 — parasi olmayan kampanya servis edilmez', () => {
+  it('bakiyesi sifir olan reklamveren atlanir', () => {
+    const { sel } = setup([camp('zengin', 10), camp('beles', 30)], { 'adv-beles': 0n })
+    expect(sel.select('p1')!.campaign.id, 'yuksek teklifli ama parasiz').toBe('zengin')
+  })
+
+  it('kalan bakiye tek bir gosterimi bile karsilamiyorsa servis yok', () => {
+    // $30 CPM → gosterim basina 30.000 micro. Bakiye 10.000.
+    const { sel } = setup([camp('a', 30)], { 'adv-a': 10_000n })
+    expect(sel.select('p1')).toBeNull()
+  })
+
+  it('bakiye tam yeterse servis edilir', () => {
+    const { sel } = setup([camp('a', 30)], { 'adv-a': 30_000n })
+    expect(sel.select('p1')).not.toBeNull()
+  })
+})
+
+describe('PROBLEMS.md #8c — gunluk harcama tavani', () => {
+  it('tavan yoksa (null/undefined) hicbir sey elenmez', () => {
+    const { sel } = setup([camp('a', 30)], {}, { a: 999_999_999_999n })
+    expect(sel.select('p1')).not.toBeNull()
+  })
+
+  it('bir sonraki gosterim tavani asacaksa kampanya o gun icin elenir', () => {
+    // $30 CPM -> gosterim basina 30.000 micro. Bugun zaten 20.000 harcanmis,
+    // bu gosterim 30.000 daha ekler -> 50.000 > tavan 40.000 -> elenir.
+    const { sel } = setup(
+      [camp('pahali', 30, { dailyBudgetMicros: micros(40_000n) }), camp('yedek', 5)],
+      {}, { pahali: 20_000n },
+    )
+    expect(sel.select('p1')!.campaign.id, 'tavana carpan degil, digeri servis edilir').toBe('yedek')
+  })
+
+  it('tam tavana kadar hala servis edilir — bir micro fazlasi degil', () => {
+    const { sel } = setup(
+      [camp('a', 30, { dailyBudgetMicros: micros(30_000n) })],
+      {}, { a: 0n },
+    )
+    expect(sel.select('p1')!.campaign.id, 'ilk gosterim tam tavani doldurur').toBe('a')
+  })
+
+  it('tum kampanyalar tavana carparsa null doner — bos reklam gosterilmez', () => {
+    const { sel } = setup(
+      [camp('a', 30, { dailyBudgetMicros: micros(100_000n) })],
+      {}, { a: 100_000n },
+    )
+    expect(sel.select('p1')).toBeNull()
+  })
+})
+
+describe('frekans kurali', () => {
+  it('eski frequencyCap sahne haklarini bolmez', () => {
+    const { sel } = setup([camp('a', 30, { frequencyCap: 1 }), camp('b', 10, { frequencyCap: 1 })])
+    const sira = Array.from({ length: 4 }, () => sel.select('p1')!.campaign.id)
+    expect(sira).toEqual(['a', 'a', 'a', 'b'])
+  })
+
+  it('tek kampanya kalirsa tekrar eder — reklam gostermemektense', () => {
+    const { sel } = setup([camp('tek', 30, { frequencyCap: 1 })])
+    expect(sel.select('p1')!.campaign.id).toBe('tek')
+    expect(sel.select('p1')!.campaign.id).toBe('tek')
+  })
+
+  it('farkli publisher\'lar birbirini etkilemez', () => {
+    const { sel } = setup([camp('a', 30), camp('b', 20)])
+    expect(sel.select('p1')!.campaign.id).toBe('a')
+    expect(sel.select('p2')!.campaign.id, 'p2 icin de en yuksek').toBe('a')
+  })
+})
+
+describe('ADR-009 (ikinci revizyon) — fiyat sirali kuyruk + ikinci fiyat', () => {
+  const usd = (x: number): Micros => micros(BigInt(Math.round(x * 1_000_000)))
+  const c = (id: string, blockUsd: number, over: Partial<Campaign> = {}) =>
+    camp(id, 0, { bidCpm: usd(blockUsd), ...over })
+
+  it('en yuksek teklif kazanir, bir sonraki teklif + 1 kurus oder (NEXT.md ornegi)', () => {
+    const { sel } = setup([c('a', 3), c('b', 2), c('c', 0.5)])
+    const s1 = sel.select('p1')!
+    expect(s1.campaign.id).toBe('a')
+    expect(s1.clearingCpm).toBe(usd(2.01))
+    expect(s1.rate).toBe(2_010n)                         // gosterim basina $0.00201
+  })
+
+  it('rakipsiz kazanan taban fiyati oder', () => {
+    const { sel } = setup([c('tek', 40)])
+    expect(sel.select('p1')!.clearingCpm).toBe(usd(0.1))
+  })
+
+  it('asla kendi teklifinden fazla odemez — esit teklifte teklif kadar', () => {
+    const { sel } = setup([c('a', 3), c('b', 3)])
+    expect(sel.select('p1')!.clearingCpm).toBe(usd(3))
+  })
+
+  it('ayni reklamverenin diger kampanyasi rakip sayilmaz', () => {
+    const { sel } = setup([
+      c('a', 3, { advertiserId: 'adv-1' }),
+      c('a2', 2, { advertiserId: 'adv-1' }),
+      c('baska', 0.5, { advertiserId: 'adv-2' }),
+    ])
+    const s1 = sel.select('p1')!
+    expect(s1.campaign.id).toBe('a')
+    expect(s1.clearingCpm).toBe(usd(0.51))
+  })
+
+  it('taban fiyat ayarlanabilir; teklifin ustundeyse fiyat teklife esitlenir', () => {
+    const kur = (reserve: number, bid: number) => new AdSelector({
+      clock: fixedClock(1), ids: fakeIdGenerator('n'), campaigns: () => [c('a', bid)],
+      spendableBalance: () => micros(10n ** 15n), spentToday: () => micros(0n), reserveCpm: usd(reserve),
+    })
+    expect(kur(1, 3).select('p1')!.clearingCpm).toBe(usd(1))
+    expect(kur(5, 3).select('p1')!.clearingCpm).toBe(usd(3))
+  })
+
+  it('havuz kampanyasi havuzun sabit fiyatini oder', () => {
+    const sel = new AdSelector({
+      clock: fixedClock(1), ids: fakeIdGenerator('n'),
+      campaigns: () => [c('p1', 5, { poolId: 'pool', advertiserId: 'sponsor' }), c('p2', 5, { poolId: 'pool', advertiserId: 'sponsor' })],
+      spendableBalance: () => micros(10n ** 15n), spentToday: () => micros(0n), poolOf: () => 'pool',
+    })
+    expect(sel.select('u')!.clearingCpm).toBe(usd(5))
+  })
+
+  it('sahne turu: tekliften asagi, teklifi kadar sahnede, sonra basa doner', () => {
+    const { sel } = setup([c('x', 1), c('iki', 2), c('dort', 4)])
+    const sira = Array.from({ length: 14 }, () => sel.select('p1')!.campaign.id)
+    const tur = ['dort', 'dort', 'dort', 'dort', 'iki', 'iki', 'x']
+    expect(sira).toEqual([...tur, ...tur])
+  })
+
+  it('10 reklam ornegi: 2 tane 4x, 2 tane 2x, 6 tane x → 18 gosterimlik tur', () => {
+    const { sel } = setup([
+      c('a', 4), c('b', 4), c('d', 2), c('e', 2),
+      c('f', 1), c('g', 1), c('h', 1), c('i', 1), c('j', 1), c('k', 1),
+    ])
+    const say: Record<string, number> = {}
+    for (let i = 0; i < 18; i++) {
+      const id = sel.select('p1')!.campaign.id
+      say[id] = (say[id] ?? 0) + 1
+    }
+    expect(say).toEqual({ a: 4, b: 4, d: 2, e: 2, f: 1, g: 1, h: 1, i: 1, j: 1, k: 1 })
+  })
+
+  it('sahne hakki 4 ile sinirli: $400 ekrani tek basina tutamaz', () => {
+    const { sel } = setup([c('elliot', 400), c('tamer', 40), c('open', 15)])
+    const sira = Array.from({ length: 8 }, () => sel.select('p1')!.campaign.id)
+    expect(sira).toEqual(['elliot', 'elliot', 'elliot', 'elliot', 'tamer', 'tamer', 'tamer', 'open'])
+  })
+
+  it('prompt biter, saatler gecer: sira kaldigi yerden devam eder', () => {
+    const { sel, clock } = setup([c('dort', 4), c('x', 1)])
+    sel.select('p1'); sel.select('p1')
+    clock.advance(6 * 3_600_000)
+    const sira = Array.from({ length: 3 }, () => sel.select('p1')!.campaign.id)
+    expect(sira, 'kalan 2 hak, sonra sira x').toEqual(['dort', 'dort', 'x'])
+  })
+
+  it('sunucu yeniden baslayinca tur kayittan devam eder', () => {
+    const kayit = new Map<string, readonly string[]>()
+    const kur = () => new AdSelector({
+      clock: fixedClock(1), ids: fakeIdGenerator('n'), campaigns: () => [c('dort', 4), c('x', 1)],
+      spendableBalance: () => micros(10n ** 15n), spentToday: () => micros(0n),
+      tourStore: { load: (p) => kayit.get(p) ?? [], save: (p, t) => { kayit.set(p, t) } },
+    })
+    const ilk = kur()
+    ilk.select('p1'); ilk.select('p1'); ilk.select('p1')
+    const sonra = kur()
+    expect(sonra.select('p1')!.campaign.id).toBe('dort')
+    expect(sonra.select('p1')!.campaign.id).toBe('x')
+  })
+
+  it('tur ortasinda eklenen kampanya sonraki turda girer', () => {
+    const campaigns = [c('a', 2), c('b', 1)]
+    const { sel } = setup(campaigns)
+    sel.select('p1')
+    campaigns.push(c('yeni', 2))
+    const sira = Array.from({ length: 3 }, () => sel.select('p1')!.campaign.id)
+    expect(sira.slice(0, 2), 'mevcut tur bitiyor').toEqual(['a', 'b'])
+    expect(sira[2], 'yeni turda girdi').not.toBe('b')
+  })
+
+  it('tur ortasinda durdurulan kampanya atlanir', () => {
+    const campaigns = [c('a', 2), c('b', 1)]
+    const { sel } = setup(campaigns)
+    sel.select('p1')
+    campaigns[0] = c('a', 2, { status: 'paused' })
+    expect(sel.select('p1')!.campaign.id).toBe('b')
+  })
+
+  it('sirasi gelen dusuk teklif ustundeki teklife gore fiyatlanmaz', () => {
+    const { sel } = setup([c('a', 2), c('b', 1), c('d', 0.5)])
+    const sonuc = Array.from({ length: 7 }, () => sel.select('p1')!)
+    const b = sonuc.find((s) => s.campaign.id === 'b')!
+    const d = sonuc.find((s) => s.campaign.id === 'd')!
+    expect(b.clearingCpm, 'alttaki rakip + 1 kurus').toBe(usd(0.51))
+    expect(d.clearingCpm, 'altinda rakip yok: taban').toBe(usd(0.1))
+  })
+
+  it('tur yayinciya ozeldir', () => {
+    const { sel } = setup([c('a', 1), c('b', 1)])
+    const ilk = sel.select('p1')!.campaign.id
+    expect(sel.select('p1')!.campaign.id).not.toBe(ilk)
+    expect(['a', 'b'], 'p2 kendi turunu baslatir').toContain(sel.select('p2')!.campaign.id)
+  })
+
+  it('geri verilen hak turun basina doner', () => {
+    const { sel } = setup([c('a', 1), c('b', 1), c('d', 1)])
+    const ilk = sel.select('p1')!.campaign.id
+    sel.returnSlots('p1', [ilk])
+    expect(sel.select('p1')!.campaign.id).toBe(ilk)
+  })
+
+  /**
+   * Gercek olayda yakalandi (2026-09-06): esit teklifli iki kampanyada,
+   * `AdSelector` (dolayisiyla birikimi) her SUNUCU YENIDEN BASLADIGINDA
+   * sifirlaniyor. Eskiden esitlik ID string'ine gore sabit kazaniyordu —
+   * yani "yeniden baslat, esitlik olustur, hep ayni ID kazansin" dongusu
+   * ayni reklamin surekli kazanmasina yol aciyordu, cunku canli sistemde
+   * deploy'lar arka arkaya geldiginde birikim hic olgunlasmiyordu.
+   */
+  it('esit teklifte tekrarlanan "yeniden baslama" ayni kazanani kilitlemez', () => {
+    const campaigns = [camp('a', 40), camp('b', 40)]
+    const kazananlar = new Set<string>()
+    // Her biri TAZE bir AdSelector — sunucunun her deploy'da birikimi
+    // sifirlayip yeniden baslamasinin birebir benzetimi. `cryptoIdGenerator`
+    // BILEREK kullaniliyor: `fakeIdGenerator` deterministik oldugu icin
+    // rastgele-dusme dalini test edemez, ilk secimde hep ayni yani secerdi.
+    for (let i = 0; i < 30; i++) {
+      const clock = fixedClock(1_700_000_000_000)
+      const sel = new AdSelector({
+        clock, ids: cryptoIdGenerator(clock),
+        campaigns: () => campaigns,
+        spendableBalance: () => micros(1_000_000_000n),
+        spentToday: () => micros(0n),
+      })
+      kazananlar.add(sel.select('p1')!.campaign.id)
+    }
+    // Ikisi de en az bir kez kazanmis olmali — tek bir ID'ye kilitlenmemeli.
+    // (Adil yazi-tura ile 30 denemede ikisinin de cikmama ihtimali ~2e-9.)
+    expect(kazananlar.size).toBe(2)
+  })
+
+})
+
+describe('nonce', () => {
+  it('her teslimatta yeni nonce uretilir', () => {
+    const { sel } = setup([camp('a', 30)])
+    const n1 = sel.select('p1')!.nonce
+    const n2 = sel.select('p1')!.nonce
+    expect(n1).not.toBe(n2)
+  })
+
+  it('nonce son kullanma tarihi tasir — replay penceresi dar', () => {
+    const { sel, clock } = setup([camp('a', 30)])
+    const s = sel.select('p1')!
+    expect(s.nonceExpiresAt).toBeGreaterThan(clock.now())
+    expect(s.nonceExpiresAt - clock.now()).toBeLessThanOrEqual(5 * 60_000)
+  })
+})
+
+describe('blok satin alma — 1 blok = 1.000 gosterim', () => {
+  const kur = (campaigns: Campaign[], committed: Record<string, number>) => new AdSelector({
+    clock: fixedClock(1_700_000_000_000), ids: fakeIdGenerator('n'),
+    campaigns: () => campaigns,
+    spendableBalance: () => micros(10n ** 15n),
+    spentToday: () => micros(0n),
+    committedImpressions: (id) => committed[id] ?? 0,
+  })
+
+  it('bloklar dolana kadar sunulur, dolunca biter', () => {
+    expect(kur([camp('a', 30, { blocks: 2 })], { a: 1_999 }).select('p1')?.campaign.id).toBe('a')
+    expect(kur([camp('a', 30, { blocks: 2 })], { a: 2_000 }).select('p1')).toBeNull()
+  })
+
+  it('biten kampanya digerlerinin onunu tikamaz', () => {
+    const sel = kur([camp('bitti', 50, { blocks: 1 }), camp('devam', 10)], { bitti: 1_000 })
+    expect(sel.select('p1')?.campaign.id).toBe('devam')
+  })
+
+  it('blok verilmemisse sinirsiz', () => {
+    expect(kur([camp('a', 30)], { a: 10_000_000 }).select('p1')?.campaign.id).toBe('a')
+  })
+})

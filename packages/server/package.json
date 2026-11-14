@@ -1,0 +1,35 @@
+{
+  "name": "@bide/server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "dev": "node build.mjs && node dist/server.mjs",
+    "build": "node build.mjs"
+  },
+  "dependencies": {
+    "@bide/payments": "workspace:*",
+    "@bide/protocol": "workspace:*",
+    "@hono/node-server": "^2.1.6",
+    "@near-js/crypto": "2.5.1",
+    "@near-js/transactions": "2.5.1",
+    "hono": "^4.13.16",
+    "maxmind": "^5.0.7"
+  },
+  "devDependencies": {
+    "@near-js/signers": "2.5.1",
+    "@near-wallet-selector/core": "10.1.4",
+    "@near-wallet-selector/hot-wallet": "10.1.4",
+    "@near-wallet-selector/intear-wallet": "10.1.4",
+    "@near-wallet-selector/meteor-wallet": "10.1.4",
+    "@near-wallet-selector/modal-ui": "10.1.4",
+    "@near-wallet-selector/sender": "10.1.4",
+    "@types/node": "^26.2.0",
+    "buffer": "6.0.3",
+    "esbuild": "^0.28.2",
+    "near-api-js": "6.2.5",
+    "util": "0.12.5"
+  }
+}

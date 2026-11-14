@@ -1,0 +1,525 @@
+#!/usr/bin/env node
+/**
+ * `bide` — kullanicinin gordugu tek yuzey.
+ *
+ * Komutlar ince: butun mantik test edilmis modullerde. Buradaki is
+ * dogrulama, sıralama ve ANLASILIR CIKTI.
+ */
+
+import { resolve, dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { existsSync, realpathSync } from 'node:fs'
+import { install, uninstall, diagnose, readSettings, detectConflicts, SETTINGS_PATH, MARKER } from '../settings.js'
+import { buildNodeCommand, currentCommandEnv, probeCommand, type BuiltCommand } from '../command-line.js'
+import { BIDE_HOME, SOCKET_PATH, isNamedPipe } from '../ipc.js'
+import * as daemon from './daemon-control.js'
+import { out, ok, warn, info, fail, rows, dim, bold, green, yellow, red, orange, banner, usdc } from './output.js'
+import { cmdLogin, cmdLogout, cmdWhoami, forgetLogin } from './login.js'
+import { cmdBalance } from './balance.js'
+import { cmdProfile } from './profile.js'
+import { loadCredentials, shortAddress } from '../credentials.js'
+import { VERSION } from '../version.js'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+/**
+ * Paket kokunu ARAYARAK bul.
+ *
+ * Sabit bir `../..` yazmak kirilgan: kaynakta `src/cli/` icindeyiz ama
+ * derlenince `dist/` oluyoruz ve seviye sayisi degisiyor. `package.json`'i
+ * yukari dogru aramak her iki duzende de calisir.
+ */
+function findPkgRoot(from: string): string {
+  let d = from
+  for (let i = 0; i < 6; i++) {
+    if (existsSync(join(d, 'package.json'))) return d
+    const up = dirname(d)
+    if (up === d) break
+    d = up
+  }
+  return resolve(from, '..')
+}
+const PKG_ROOT = findPkgRoot(HERE)
+
+/** Derlenmis shim — TypeScript kaynagi DEGIL (ADR-003 olcumu). */
+const shimPath = (): string => {
+  const compiled = join(PKG_ROOT, 'dist', 'statusline.mjs')
+  return existsSync(compiled) ? compiled : join(PKG_ROOT, 'src', 'shim', 'statusline.ts')
+}
+const hookPath = (): string => join(PKG_ROOT, 'dist', 'hook.mjs')
+const daemonEntry = (): string => join(PKG_ROOT, 'dist', 'daemon.mjs')
+
+/**
+ * `settings.json`'a yazilan komutlar. Bir kez hesaplanir: Windows'ta 8.3
+ * kisa adi icin `cmd` calistirmak gerekebiliyor (bkz. `command-line.ts`).
+ */
+let built: { readonly statusLine: BuiltCommand; readonly hook: BuiltCommand } | null = null
+function commands(): { readonly statusLine: BuiltCommand; readonly hook: BuiltCommand } {
+  if (!built) {
+    const env = currentCommandEnv()
+    built = {
+      statusLine: buildNodeCommand(shimPath(), [], env),
+      hook: buildNodeCommand(hookPath(), [], env),
+    }
+  }
+  return built
+}
+const statusLineCommand = (): string => commands().statusLine.command
+
+/** Bizim ayarlarimiz — init ve `doctor --fix` ayni sekilde yazar. */
+function installOurs(opts: { spinnerVerbs?: readonly string[]; force?: boolean }) {
+  return install({
+    statusLineCommand: statusLineCommand(),
+    hookCommand: commands().hook.command,
+    refreshIntervalSec: 1,
+    ...(opts.spinnerVerbs ? { spinnerVerbs: opts.spinnerVerbs } : {}),
+    force: opts.force ?? false,
+  })
+}
+
+/* ─────────────────────────── komutlar ─────────────────────────── */
+
+/**
+ * Paket GECICI bir konumdan mi calisiyor?
+ *
+ * `npx bidesh init` paketi `~/.npm/_npx/<hash>/` altina indirir. Kurulum
+ * oraya MUTLAK YOL yazar — statusLine, uc hook ve daemon girisi hep o
+ * klasoru gosterir.
+ *
+ * O klasor gecicidir: `npm cache clean`, farkli bir surum cekmek ya da bir
+ * disk temizleyici silebilir. Silindigi gun statusLine olmayan bir dosyayi
+ * cagirmaya baslar. Kullanici hicbir sey degistirmemistir, reklam durur ve
+ * sebebi gorunmez — ay sonra "bir ara calisiyordu" diye geri gelir.
+ *
+ * Bu yuzden kurmayi REDDEDIYORUZ. Bugun calisip yarin sessizce bozulan bir
+ * kurulum, en bastan kurulmamis olmaktan kotudur.
+ */
+function geciciKonum(): string | null {
+  const p = PKG_ROOT
+  if (p.includes('/_npx/') || p.includes('\\_npx\\')) return 'npx cache'
+  if (p.includes('/.npm/_cacache') || p.includes('/tmp/') || p.startsWith('/private/tmp/')) {
+    return 'temporary folder'
+  }
+  return null
+}
+
+async function cmdInit(argv: string[]): Promise<void> {
+  banner()
+  const force = argv.includes('--force')
+  const withSpinner = argv.includes('--spinner')
+
+  const gecici = geciciKonum()
+  if (gecici && !argv.includes('--allow-temp')) {
+    fail(
+      'BID-1004',
+      `Bide is running from a ${gecici} — cannot install from here`,
+      'Install it permanently:  npm i -g bidesh && bide init',
+    )
+  }
+
+  // 1. Cakisma var mi? ONCE sor, sonra yaz.
+  let settings
+  try { settings = readSettings() } catch (e) {
+    fail('BID-1003', 'Could not read the Claude Code settings file',
+      `${SETTINGS_PATH} may contain broken JSON. Fix it and try again — we didn't touch the file.`)
+  }
+  const conflicts = detectConflicts(settings).filter((c) => !c.ours)
+
+  if (conflicts.length > 0 && !force) {
+    warn('You already have settings — we did NOT overwrite them:')
+    out()
+    for (const c of conflicts) info(`${bold(c.field)}  ${dim(c.current)}`)
+    out()
+    info(`To install anyway: ${bold('bide init --force')}`)
+    info(dim('(your current setting is backed up, `bide uninstall` won\'t restore it —'))
+    info(dim(' the backup lives under ~/.claude/bide-backups/)'))
+    out()
+  }
+
+  // 2. settings.json
+  const result = installOurs({ ...(withSpinner ? { spinnerVerbs: ['✶ Bide'] } : {}), force })
+
+  for (const f of result.changed) ok(`${f} installed`)
+  if (result.backupPath) info(dim(`backup: ${result.backupPath}`))
+  const cmdWarning = commands().statusLine.warning ?? commands().hook.warning
+  if (cmdWarning) warn(cmdWarning)
+
+  // 3. Daemon
+  out()
+  const started = await daemon.start({ entry: daemonEntry() })
+  if ('error' in started) {
+    if (started.error.includes('already')) ok('daemon already running')
+    else fail('BID-1001', 'Could not start the daemon', started.error)
+  } else {
+    ok(`daemon running (pid ${started.pid})`)
+  }
+
+  // 4. Giris yapilmadiysa BUNU SOYLE.
+  //
+  // Sunucu bagli degilken reklam yok, yalnizca "kazanmiyorsun" satiri var.
+  // Bunu sessiz gecmek, kullaniciyi kazandigini SANARAK beklemeye birakmak
+  // olurdu.
+  if (!loadCredentials()) {
+    out()
+    warn(`no wallet connected — ${bold('no ads, no earnings')}`)
+    info(`to start earning: ${bold('bide login')}`)
+  }
+
+  // 5. Ne degistigini SOYLE — kullanicidan bir sey aldik.
+  out()
+  out(`  ${bold('Good to know')}`)
+  info('• Claude Code no longer shows some keyboard hints on the bottom line')
+  info(`  (like ${dim('esc to interrupt')}) — happens whenever a custom statusLine is set`)
+  if (withSpinner) info('• Spinner words changed')
+  info(`• To undo: ${bold('bide uninstall')} — we remove our own footprint, we don't touch your settings`)
+  out()
+  info(`Open a new Claude Code session. ${dim('It will show up on the bottom line while you wait.')}`)
+  out()
+}
+
+async function cmdDoctor(argv: readonly string[] = []): Promise<void> {
+  banner()
+
+  // `--fix`: yalnizca BIZIM girdilerimizi bugunun bicimiyle yeniden yazar.
+  // Eski surumlerin tirnakli komutlari (PowerShell'de calismayan) boyle
+  // tasinir. Baskasinin ayarina dokunmaz — `--force` yok.
+  if (argv.includes('--fix')) {
+    let current
+    try { current = readSettings() } catch {
+      fail('BID-1003', 'Could not read the Claude Code settings file', `${SETTINGS_PATH} may contain broken JSON.`)
+    }
+    const sv = current.spinnerVerbs
+    const r = installOurs(sv?.[MARKER] === true ? { spinnerVerbs: sv.verbs ?? ['✶ Bide'] } : {})
+    for (const f of r.changed) ok(`${f} rewritten`)
+    for (const c of r.skipped) warn(`${c.field} belongs to another tool — left alone`)
+    if (!(await daemon.isAlive())) {
+      const started = await daemon.start({ entry: daemonEntry() })
+      if ('error' in started && !started.error.includes('already')) warn(`daemon: ${started.error}`)
+    }
+    out()
+  }
+
+  const expected = statusLineCommand()
+  const d = diagnose(expected, SETTINGS_PATH, commands().hook.command)
+  const alive = await daemon.isAlive()
+  const health = alive ? await daemon.ask({ t: 'health' }) : null
+
+  const checks: [string, boolean, string][] = [
+    ['settings.json', d.installed, d.detail],
+    ['daemon', alive, alive ? `pid ${daemon.readPid() ?? '?'}` : 'not running — `bide init`'],
+    // Named pipe'in dosyasi yok; varligini ancak cevap vermesi kanitlar.
+    ['socket', isNamedPipe(SOCKET_PATH) ? alive : existsSync(SOCKET_PATH), SOCKET_PATH],
+    ['shim', existsSync(shimPath()), shimPath().endsWith('.ts')
+      ? 'TypeScript source — the compiled version is faster' : 'compiled'],
+    ['spinner', d.spinnerOwner !== 'baskasinin', d.spinnerDetail ?? 'not installed'],
+  ]
+
+  for (const [name, good, detail] of checks) {
+    out(`  ${good ? green('✓') : red('✗')} ${bold(name.padEnd(14))} ${dim(detail)}`)
+  }
+
+  if (d.spinnerOwner === 'baskasinin') {
+    out()
+    warn('spinnerVerbs belongs to ANOTHER TOOL — spinner sync is silently off.')
+    info('We don\'t touch it, per the rule of never overwriting a user\'s own')
+    info('setting. Another plugin using the same surface may be installed;')
+    info('some of these write their value back within seconds, so even')
+    info('`--force` wouldn\'t stick. Remove that tool first, then run `bide init --spinner`.')
+  }
+
+  // Komutlari GERCEKTEN calistir. "Kuruldu" yesili yetmiyor: komut
+  // PowerShell'de ParserError verirken daemon, soket ve reklam onbellegi
+  // kusursuz gorunuyordu ve kullanici hicbir reklam gormuyordu.
+  const probeFailed = probeOurCommands()
+
+  const cmdWarning = commands().statusLine.warning ?? commands().hook.warning
+  if (cmdWarning) {
+    out()
+    warn(cmdWarning)
+  }
+
+  if (probeFailed) {
+    out()
+    out(`  ${red('✗')} ${bold('Claude Code cannot run the Bide commands on this machine.')}`)
+    info('No ads will show and no impressions will be counted until this is fixed.')
+    info(`Fix: ${bold('bide doctor --fix')}  ${dim('(rewrites our settings.json entries)')}`)
+    if (process.platform === 'win32') {
+      info(dim('Still failing? Make sure `node` runs in PowerShell, or install Git for Windows.'))
+    }
+  }
+
+  if (d.hijacked) {
+    out()
+    warn('Your statusLine setting has been changed by ANOTHER TOOL.')
+    info('Another plugin using the same line may be installed; some of these')
+    info('periodically restore their own setting.')
+    info(`To reinstall: ${bold('bide init --force')}`)
+  }
+
+  if (health?.t === 'health') {
+    out()
+    const i = health.info
+    rows([
+      ['status', i.phase],
+      ['queued', `${i.queuedImpressions} impression(s)`],
+      ['ads', `${i.adsCached} cached`],
+      ['render', i.renderEnabled ? 'on' : 'off'],
+      ...(i.paused ? [['paused', 'yes — `bide resume`'] as const] : []),
+      ...(i.lastError ? [['last error', i.lastError] as const] : []),
+    ])
+  }
+
+  // Faturalandirma YALNIZCA statusLine'a dayaniyor. Claude Code'un
+  // dokumantasyonu VS Code/JetBrains eklentisinin grafik panelinde ya da
+  // masaustu uygulamasinda ozel statusLine'in gosterildigini SOYLEMIYOR;
+  // orada calisiyorsan reklam gorunmez ve hicbir sey sayilmaz.
+  out()
+  info(dim('Ads show only in Claude Code running in a terminal (including an IDE\'s'))
+  info(dim('integrated terminal). The VS Code / JetBrains panels and the desktop app'))
+  info(dim('are not documented to render statusLine, so nothing is shown or counted there.'))
+  out()
+}
+
+/**
+ * Bizim settings.json girdilerimizi Claude Code'un kullanabilecegi
+ * kabuklarda calistirir ve sonucu yazar. Claude Code'un GERCEKTEN
+ * kullandigi kabukta basarisizsa `true` doner.
+ */
+function probeOurCommands(): boolean {
+  let s
+  try { s = readSettings() } catch { return false }
+  const targets: [string, string | undefined][] = [
+    ['statusLine', s.statusLine?.[MARKER] ? s.statusLine.command : undefined],
+    // SessionStart tur makinesinde hicbir sey degistirmiyor; denemek zararsiz.
+    ['SessionStart hook', s.hooks?.['SessionStart']?.find((h) => h[MARKER] === true)?.hooks[0]?.command],
+  ]
+  const stdin = JSON.stringify({ session_id: 'bide-doctor', hook_event_name: 'SessionStart' })
+  let failed = false
+  out()
+  out(`  ${bold('Commands, run the way Claude Code runs them')}`)
+  for (const [name, command] of targets) {
+    if (!command) continue
+    for (const p of probeCommand(command, stdin)) {
+      const mark = p.ok ? green('✓') : p.usedByClaude ? red('✗') : yellow('!')
+      const who = p.usedByClaude ? 'used by Claude Code' : 'not used by Claude Code here'
+      out(`  ${mark} ${bold(name.padEnd(18))} ${p.shell.padEnd(11)} ${dim(`${p.detail} · ${who}`)}`)
+      if (!p.ok && p.usedByClaude) failed = true
+    }
+  }
+  return failed
+}
+
+async function cmdUninstall(): Promise<void> {
+  banner()
+  // Sira onemli: daemon kapanirken bekleyen gosterimleri bu token'la gonderir.
+  await daemon.stop()
+  ok('daemon stopped')
+
+  const c = loadCredentials()
+  if (c) {
+    const revoked = await forgetLogin(c)
+    ok(`wallet disconnected — ${shortAddress(c.publisherId)}`)
+    if (!revoked) warn('could not reach the server — the token stays valid there until it is revoked')
+  }
+
+  const r = uninstall()
+  if (r.removed.length === 0) warn('couldn\'t find any of our own settings in settings.json')
+  for (const f of r.removed) ok(`${f} removed`)
+  if (r.backupPath) info(dim(`backup: ${r.backupPath}`))
+
+  /**
+   * Spinner ACIK OTURUMDA hemen kaybolmaz — bunu SOYLEMEK zorundayiz.
+   *
+   * Claude Code `spinnerVerbs`'u canli okumuyor; acik oturum, dosyadan
+   * silinmis olsa bile son okudugu degerle devam ediyor. statusLine ise
+   * her tikta yeniden calistigi icin aninda gidiyor.
+   *
+   * Sonuc: "spinnerVerbs kaldirildi" yazip kullanicinin ekraninda markayi
+   * birakmak. Kaldirma komutunun isini yapmadigini dusunur, hakli olarak.
+   * Dosyada yapacak bir sey kalmadi; tek dogru davranis ne oldugunu
+   * soylemek.
+   */
+  if (r.removed.includes('spinnerVerbs')) {
+    out()
+    info(`Spinner words won't change ${bold('in an open session')} —`)
+    info(dim('Claude Code doesn\'t re-read them. Its own words return in a new session.'))
+  }
+
+  out()
+  info('Your other settings were untouched.')
+  info(`Your earnings stay with your wallet — ${bold('bide init')} and ${bold('bide login')} bring you back.`)
+  out()
+}
+
+async function cmdStatus(): Promise<void> {
+  banner()
+  const health = await daemon.ask({ t: 'health' })
+  if (health === null || health.t !== 'health') {
+    fail('BID-1001', 'Daemon is not running', '`bide init` to start it')
+  }
+  const i = health.info
+  // Cuzdan satiri: girissiz daemon ornek satirlar gosterip "showing" diyor,
+  // kullanici kazandigini saniyordu (6 Kasim, bir ay hicbir sey sayilmadi).
+  const creds = loadCredentials()
+  rows([
+    ['version', i.version],
+    ['wallet', creds ? shortAddress(creds.publisherId) : yellow('not connected — not earning · `bide login`')],
+    ['status', i.phase === 'idle' ? dim('waiting') : green(i.phase)],
+    ['uptime', `${Math.round(i.uptimeMs / 60_000)} min`],
+    ['queued', `${i.queuedImpressions} impression(s)`],
+    ['active session', i.activeSession ?? dim('none')],
+  ])
+  out()
+}
+
+async function cmdPause(paused: boolean): Promise<void> {
+  const alive = await daemon.isAlive()
+  if (!alive) fail('BID-1001', 'Daemon is not running', '`bide init` to start it')
+
+  // Once GERCEKTEN durdur, sonra soyle.
+  //
+  // Onceden bu komut yalnizca mesaj basiyordu: kullanici duraklattigini
+  // sanip reklamlar donmeye devam ediyordu. Bir arayuzun yapabilecegi en
+  // kotu sey, olmayan bir seyi olmus gibi gostermek.
+  const res = await daemon.ask({ t: 'pause', on: paused })
+  if (!res || res.t !== 'ok') {
+    fail('BID-1001', paused ? 'Could not pause' : 'Could not resume', 'daemon did not respond')
+  }
+
+  out(paused ? `${yellow('⏸')} paused — ads won't be shown` : `${green('▶')} resumed`)
+  if (paused) info(dim('persists: stays paused even if you restart · `bide resume`'))
+}
+
+/**
+ * Daemon'i durdurup yeniden baslatir.
+ *
+ * `bide login` sonrasi gerekiyor: daemon token'i YALNIZCA acilista okuyor.
+ * Bu komut olmadan kullanicinin "kapat ac" demesi gerekirdi ve `login`
+ * ciktisi zaten `bide restart` diyordu — olmayan bir komutu tarif eden
+ * bir mesaj, hic mesaj olmamasindan kotu.
+ */
+async function cmdRestart(): Promise<void> {
+  banner()
+  const durdu = await daemon.stop()
+  if (durdu) ok('daemon stopped')
+
+  const started = await daemon.start({ entry: daemonEntry() })
+  if ('error' in started) fail('BID-1001', 'Could not start the daemon', started.error)
+  ok(`daemon running (pid ${started.pid})`)
+
+  const creds = loadCredentials()
+  if (creds) info(dim(`wallet ${shortAddress(creds.publisherId)}`))
+  else info(dim('no wallet connected — `bide login`'))
+  out()
+}
+
+function cmdHelp(): void {
+  banner()
+  out(`  ${dim('Turns your AI coding tool\'s wait time into earnings.')}`)
+  out()
+  rows([
+    ['bide init', 'install and start'],
+    ['bide login', 'connect your wallet — earnings go here'],
+    ['bide balance', 'show your earnings'],
+    ['bide profile', 'leaderboard nickname, country, listed or not'],
+    ['bide whoami', 'show the connected wallet'],
+    ['bide logout', 'disconnect the wallet'],
+    ['bide doctor', 'diagnose the setup'],
+    ['bide status', 'daemon status'],
+    ['bide restart', 'restart the daemon'],
+    ['bide pause', 'pause ads temporarily'],
+    ['bide resume', 'resume'],
+    ['bide uninstall', 'remove — we clean up our own footprint'],
+    ['bide version', 'print the version'],
+  ])
+  out()
+  rows([
+    ['--force', 'overwrite the existing setting'],
+    ['--spinner', 'also install the spinner layer'],
+  ])
+  out()
+}
+
+/* ─────────────────────────── giris ─────────────────────────── */
+
+export async function main(argv: readonly string[]): Promise<void> {
+  const [cmd = 'help', ...rest] = argv
+
+  switch (cmd) {
+    case 'init': return cmdInit(rest)
+    case 'doctor': return cmdDoctor(rest)
+    case 'uninstall': return cmdUninstall()
+    case 'status': return cmdStatus()
+    case 'restart': return cmdRestart()
+    case 'pause': return cmdPause(true)
+    case 'resume': return cmdPause(false)
+    // Daemon'i yeniden baslatma yetenegi ICERI VERILIYOR: kimlik degisince
+    // daemon'in onu almasi sart, yoksa kazanc eski cuzdana yazilir.
+    // Calismiyorsa `null` — o zaman baslatacak bir sey yok.
+    case 'login': return cmdLogin(rest, async () => {
+      if (!(await daemon.isAlive())) return null
+      await daemon.stop()
+      return daemon.start({ entry: daemonEntry() })
+    })
+    case 'logout': return cmdLogout({
+      stop: () => daemon.stop(),
+      start: () => daemon.start({ entry: daemonEntry() }),
+    })
+    case 'whoami': return cmdWhoami()
+    case 'balance': return cmdBalance(rest)
+    case 'profile': return cmdProfile(rest)
+    case 'help': case '--help': case '-h': return cmdHelp()
+    /**
+     * Surum. Daemon'a SORMAZ — herkesin ilk denedigi komut bu ve daemon
+     * calismiyorken de cevap vermeli. `bide status` daemon'dan okuyor,
+     * o ayri bir sey.
+     *
+     * Cikti suslenmemis tek satir: hata bildiren biri bunu kopyalayip
+     * yapistiriyor, betikler de bunu ayristiriyor.
+     */
+    case 'version': case '--version': case '-v':
+      out(VERSION)
+      return
+    default:
+      fail('BID-9001', `unknown command: ${cmd}`, '`bide help` to see the commands')
+  }
+}
+
+/**
+ * Bu dosya dogrudan mi calistirildi, yoksa import mu edildi?
+ *
+ * Onceden dosya ADINI karsilastiriyordu:
+ *
+ *     import.meta.url.endsWith(process.argv[1].split('/').pop())
+ *
+ * Ve bu, paketin npm'den kurulan halini TAMAMEN ISLEVSIZ birakiyordu.
+ * `bin` girdisi `bide` adinda bir sembolik bag uretiyor — uzantisiz. O
+ * zaman karsilastirma `".../bide.mjs".endsWith("bide")` oluyor, yani
+ * false; `main()` hic cagrilmiyor. Program cikis kodu 0 ile, TEK BIR
+ * KARAKTER BASMADAN sonlaniyordu.
+ *
+ * Belirtisi yoktu: hata yok, uyari yok, cikis kodu basarili. `npx bidesh
+ * init` yazan biri hicbir sey olmadigini goruyordu. Gelistirmede hic
+ * gorunmedi cunku orada `node dist/bide.mjs` ile, yani dosya adiyla
+ * cagriliyor.
+ *
+ * Simdi iki yolun da SEMBOLIK BAGLARI COZULMUS hali karsilastiriliyor.
+ */
+function dogrudanCalistirildi(): boolean {
+  const argv1 = process.argv[1]
+  if (!argv1) return false
+  try {
+    return realpathSync(argv1) === realpathSync(fileURLToPath(import.meta.url))
+  } catch {
+    // Yol okunamiyorsa calistirmiyoruz: yanlis tarafta hata yapmak,
+    // import edilen bir modulun kendini calistirmasi olurdu.
+    return false
+  }
+}
+
+if (dogrudanCalistirildi()) {
+  main(process.argv.slice(2)).catch((e: unknown) => {
+    // Stack trace ASLA kullaniciya gitmez.
+    fail('BID-9001', 'Unexpected error', e instanceof Error ? e.message : String(e))
+  })
+}

@@ -1,0 +1,442 @@
+/**
+ * Reklamveren para cekme.
+ *
+ * Denetimde bulundu: para giriyordu, cikmiyordu. Buradaki testlerin cogu
+ * "cekebiliyor mu" degil, "cekMEmesi gereken durumda cekemiyor mu"
+ * sorusunu soruyor — bir para cikisinda hata, olmamasi gereken bir
+ * odemedir.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { fixedClock, micros, type Micros } from '@bide/protocol'
+import type { PaymentRail, PayoutBatch, SubmissionReceipt, SettlementState } from '@bide/payments'
+import { openDb, type Db } from '../src/store/db.js'
+import { SqliteLedgerStore, SqlitePayoutStore } from '../src/store/persistent.js'
+import { Ledger } from '../src/ledger/ledger.js'
+import { accountId, PLATFORM_REVENUE } from '../src/ledger/accounts.js'
+import { WithdrawService, MIN_WITHDRAW, createSerial } from '../src/payouts/withdraw.js'
+
+const ADV = 'acme-ads.testnet'
+
+class SahteRail implements PaymentRail {
+  sonuc: SettlementState = 'settled'
+  kayitli = true
+  hesapVar = true
+  prepareVar = true
+  gonderilen: PayoutBatch[] = []
+  #n = 0
+  constructor(private clock: { now: () => number }) {}
+  now() { return this.clock.now() }
+  async validateDestinations(a: readonly string[]) {
+    return a.map((address) => ({
+      address, exists: this.hesapVar, registered: this.kayitli,
+    }))
+  }
+  async sourceStatus() {
+    return { address: 'bide-treasury.testnet', usdcBalance: micros(10n ** 12n), availableGas: 10n ** 24n, nonce: '1' }
+  }
+  async prepare(batch: PayoutBatch): Promise<SubmissionReceipt> {
+    if (!this.prepareVar) throw new Error('zarf kurulamadi')
+    this.gonderilen.push(batch)
+    return {
+      batchId: batch.batchId, txHash: `h${++this.#n}`.padEnd(64, '0'),
+      signedTx: `tx-${batch.batchId}`, nonce: String(this.#n),
+      maxTime: this.clock.now() + 180_000, feeBid: 100n,
+      opIndex: batch.items.map((it, index) => ({ publisherId: it.publisherId, index })),
+    }
+  }
+  async send() {}
+  async reconcile(r: SubmissionReceipt) {
+    return { state: this.sonuc, txHash: r.txHash, ledger: 1, feeCharged: 100n, opResults: [] }
+  }
+}
+
+let dir: string, db: Db
+const clock = fixedClock(1_700_000_000_000)
+let n = 0
+
+function kur(spendable: bigint, bakiye = spendable, ek: Partial<ConstructorParameters<typeof WithdrawService>[0]> = {}) {
+  const ids = () => `id-${++n}`
+  const ledger = new Ledger(new SqliteLedgerStore(db, clock, ids), clock, ids)
+  if (bakiye > 0n) ledger.deposit({ advertiserId: ADV, amount: micros(bakiye), topupId: `t-${++n}` })
+  const rail = new SahteRail(clock)
+  const loglar: string[] = []
+  const svc = new WithdrawService({
+    clock, ledger, rail, store: new SqlitePayoutStore(db),
+    kind: 'advertiser',
+    spendable: () => micros(spendable),
+    newBatchId: () => `w-${++n}`,
+    log: (m) => loglar.push(m),
+    ...ek,
+  })
+  return { svc, ledger, rail, loglar }
+}
+
+const bakiye = (l: Ledger) => l.balance(accountId('advertiser', ADV))
+
+beforeEach(() => { dir = mkdtempSync(join(tmpdir(), 'bide-w-')); db = openDb(join(dir, 'w.db')); n = 0 })
+afterEach(() => { db.close(); rmSync(dir, { recursive: true, force: true }) })
+
+describe('para cekme', () => {
+  it('harcanmamis butce cekilir ve defterden DUSER', async () => {
+    const t = kur(20_000_000n)
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(true)
+    expect(bakiye(t.ledger)).toBe(0n)
+    expect(t.ledger.audit()).toEqual([])
+  })
+
+  it('kismi cekimde kalan durur', async () => {
+    const t = kur(20_000_000n)
+    await t.svc.withdraw(ADV, micros(8_000_000n))
+    expect(bakiye(t.ledger)).toBe(12_000_000n)
+  })
+
+  it('para KENDI adresine gider, baska yere degil', async () => {
+    const t = kur(20_000_000n)
+    await t.svc.withdraw(ADV, micros(20_000_000n))
+    expect(t.rail.gonderilen[0]!.items[0]!.address).toBe(ADV)
+  })
+
+  /**
+   * En onemli kural. Teslim edilmis ama henuz raporlanmamis reklamlarin
+   * karsiligi rezervede. Cekilebilseydi reklamveren reklamini gosterttirip
+   * parasini geri alir, yayinci karsiligini alamazdi.
+   */
+  it('REZERVE edilmis para cekilemez', async () => {
+    // Bakiye 20, harcanabilir yalnizca 5 — gerisi teslim edilmis reklamlarda.
+    const t = kur(5_000_000n, 20_000_000n)
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).toContain('raporlanmamis')
+    expect(bakiye(t.ledger)).toBe(20_000_000n)      // hicbir sey hareket etmedi
+  })
+
+  it('harcanabilir tutarin tamami cekilebilir', async () => {
+    const t = kur(5_000_000n, 20_000_000n)
+    expect((await t.svc.withdraw(ADV, micros(5_000_000n))).ok).toBe(true)
+    expect(bakiye(t.ledger)).toBe(15_000_000n)
+  })
+
+  it('sifir tutar cekilemez (MIN_WITHDRAW - 1)', async () => {
+    const t = kur(20_000_000n)
+    const r = await t.svc.withdraw(ADV, micros(MIN_WITHDRAW - 1n))
+    expect(r.ok).toBe(false)
+    expect(bakiye(t.ledger)).toBe(20_000_000n)
+  })
+
+  /* ── cuzdan kontrolleri ── */
+
+  it('USDC kaydi olmayan hesaba da gonderilir — depozitoyu rail yatirir', async () => {
+    const t = kur(20_000_000n)
+    t.rail.kayitli = false
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(true)
+    expect(t.rail.gonderilen).toHaveLength(1)
+  })
+
+  it('zincirde olmayan hesaba gonderilmez', async () => {
+    const t = kur(20_000_000n)
+    t.rail.hesapVar = false
+    expect((await t.svc.withdraw(ADV, micros(20_000_000n))).ok).toBe(false)
+    // Para yerinde: gonderilemeyen odeme defterden DUSMEZ.
+    expect(bakiye(t.ledger)).toBe(20_000_000n)
+    expect(t.rail.gonderilen).toHaveLength(0)
+  })
+
+  /* ── ariza modlari ── */
+
+  it('zincirde patlarsa para GERI DONER', async () => {
+    const t = kur(20_000_000n)
+    t.rail.sonuc = 'failed'
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(false)
+    expect(bakiye(t.ledger)).toBe(20_000_000n)      // iade edildi
+    expect(t.ledger.audit()).toEqual([])
+  })
+
+  it('sure dolarsa da iade edilir', async () => {
+    const t = kur(20_000_000n)
+    t.rail.sonuc = 'expired'
+    await t.svc.withdraw(ADV, micros(20_000_000n))
+    expect(bakiye(t.ledger)).toBe(20_000_000n)
+  })
+
+  /**
+   * "Bilmiyorum"u "olmadi" saymak, zincirde gecmis bir odemeyi ikinci kez
+   * yapmak demek. Belirsizde para YOLDA kalir, iade EDILMEZ.
+   */
+  it('belirsiz kalirsa iade EDILMEZ, yolda bekler', async () => {
+    const t = kur(20_000_000n)
+    t.rail.sonuc = 'pending'
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(false)
+    expect(bakiye(t.ledger)).toBe(0n)                                  // hesaptan cikti
+    expect(t.ledger.balance(accountId('payouts_in_flight'))).toBe(20_000_000n)  // ama yolda
+  })
+
+  it('onay gecikirse bekleme suresi icinde zincire tekrar sorar ve sonucu dondurur', async () => {
+    const beklemeler: number[] = []
+    const t = kur(20_000_000n, 20_000_000n, { confirmWaitMs: 10_000, sleep: async (ms) => { beklemeler.push(ms) } })
+    let sorgu = 0
+    t.rail.reconcile = async (r) => ({
+      state: ++sorgu < 3 ? 'pending' : 'settled', txHash: r.txHash, ledger: 1, feeCharged: 100n, opResults: [],
+    })
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+    expect(r.ok).toBe(true)
+    expect(sorgu).toBe(3)
+    expect(t.ledger.balance(accountId('payouts_in_flight'))).toBe(0n)
+  })
+
+  it('bekleme suresi dolarsa yine belirsiz doner, sonsuza kadar beklemez', async () => {
+    let n = 0
+    const t = kur(20_000_000n, 20_000_000n, { confirmWaitMs: 6_000, sleep: async () => { n++ } })
+    t.rail.sonuc = 'pending'
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+    expect(r.ok).toBe(false)
+    expect(n).toBe(3)
+  })
+
+  it('zarf kurulamazsa hicbir kayit yazilmaz', async () => {
+    const t = kur(20_000_000n)
+    t.rail.prepareVar = false
+    const r = await t.svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.retryable).toBe(true)
+    expect(bakiye(t.ledger)).toBe(20_000_000n)
+  })
+
+  /**
+   * Iki cekim ayni anda calisirsa ikisi de ayni bakiyeyi gorur ve toplami
+   * bakiyeyi asar.
+   */
+  it('ayni anda iki cekim calismaz', async () => {
+    const t = kur(20_000_000n)
+    const [a, b] = await Promise.all([
+      t.svc.withdraw(ADV, micros(20_000_000n)),
+      t.svc.withdraw(ADV, micros(20_000_000n)),
+    ])
+    expect([a.ok, b.ok].filter(Boolean)).toHaveLength(1)
+    expect(t.rail.gonderilen).toHaveLength(1)
+  })
+
+  it('cekim sonrasi defter invariantlari saglam', async () => {
+    const t = kur(20_000_000n)
+    await t.svc.withdraw(ADV, micros(12_000_000n))
+    expect(t.ledger.audit()).toEqual([])
+  })
+
+  it('cekilebilir tutar esigin altindaysa sifir gosterilir', () => {
+    const t = kur(MIN_WITHDRAW - 1n)
+    expect(t.svc.available(ADV)).toBe(0n)
+  })
+})
+
+/**
+ * Yayinci cekimi — ayni makine, farkli hesap turu.
+ *
+ * Reklamverenden fark: `spendable` burada dogrudan ledger bakiyesi.
+ * Rezerve edilecek bir sey yok, cunku yayinci bakiyesi zaten yalnizca
+ * `verified` gosterimlerden olusuyor (ADR-011).
+ */
+describe('yayinci cekimi — kind: publisher', () => {
+  const PUB = 'bob.testnet'
+
+  function kurYayinci(kazancMicros: bigint) {
+    const ids = () => `id-${++n}`
+    const ledger = new Ledger(new SqliteLedgerStore(db, clock, ids), clock, ids)
+    // Reklamvereni once fonla, sonra gosterimi PARA OLARAK yayinciya yaz —
+    // gercek akisin aynisi (Pipeline.runVerification → ledger.postImpression).
+    ledger.deposit({ advertiserId: ADV, amount: micros(kazancMicros * 2n), topupId: `t-${++n}` })
+    ledger.postImpression({
+      impressionId: `i-${++n}`, advertiserId: ADV, publisherId: PUB, campaignId: 'c1',
+      rate: micros(kazancMicros * 2n), revShareBps: 5000,     // %50 pay → yayinciya kazancMicros
+    })
+    const rail = new SahteRail(clock)
+    const loglar: string[] = []
+    const svc = new WithdrawService({
+      clock, ledger, rail, store: new SqlitePayoutStore(db),
+      kind: 'publisher',
+      spendable: (id) => ledger.balance(accountId('publisher', id)),
+      newBatchId: () => `w-${++n}`,
+      log: (m) => loglar.push(m),
+    })
+    return { svc, ledger, rail, loglar }
+  }
+
+  it('verified gosterimlerden birikmis kazanc istege bagli cekilir', async () => {
+    const t = kurYayinci(20_000_000n)
+    const r = await t.svc.withdraw(PUB, micros(20_000_000n))
+
+    expect(r.ok).toBe(true)
+    expect(t.ledger.balance(accountId('publisher', PUB))).toBe(0n)
+    expect(t.ledger.audit()).toEqual([])
+  })
+
+  it('para KENDI cuzdanina gider, baska bir hedefe degil', async () => {
+    const t = kurYayinci(20_000_000n)
+    await t.svc.withdraw(PUB, micros(20_000_000n))
+    expect(t.rail.gonderilen[0]!.items[0]!.address).toBe(PUB)
+  })
+
+  it('reklamverendeki gibi bir rezerve YOK — tum bakiye tek seferde cekilebilir', async () => {
+    const t = kurYayinci(20_000_000n)
+    expect(t.svc.available(PUB)).toBe(20_000_000n)
+    expect((await t.svc.withdraw(PUB, micros(20_000_000n))).ok).toBe(true)
+  })
+
+  it('taban yok: kucuk bir bakiyenin tamami cekilebilir', async () => {
+    const t = kurYayinci(3_850n)
+    expect(t.svc.available(PUB)).toBe(3_850n)
+    expect((await t.svc.withdraw(PUB, micros(3_850n))).ok).toBe(true)
+  })
+
+  it('sifir tutar cekilemez', async () => {
+    const t = kurYayinci(3_850n)
+    expect((await t.svc.withdraw(PUB, micros(0n))).ok).toBe(false)
+  })
+
+  it('bakiyenin ustunde cekim istenirse reddedilir, "raporlanmamis" gibi yanlis bir sebep verilmez', async () => {
+    const t = kurYayinci(20_000_000n)
+    const r = await t.svc.withdraw(PUB, micros(30_000_000n))
+    expect(r.ok).toBe(false)
+    expect(r.ok === false && r.reason).not.toContain('raporlanmamis')
+  })
+
+  it('zincirde patlarsa yayincinin parasi GERI DONER', async () => {
+    const t = kurYayinci(20_000_000n)
+    t.rail.sonuc = 'failed'
+    await t.svc.withdraw(PUB, micros(20_000_000n))
+    expect(t.ledger.balance(accountId('publisher', PUB))).toBe(20_000_000n)
+    expect(t.ledger.audit()).toEqual([])
+  })
+})
+
+/**
+ * Platform cekimi — denetimde bulundu: platform payi her gosterimde
+ * `PLATFORM_REVENUE`'ye yaziliyordu ama onu okuyan/ceken TEK BIR SATIR
+ * kod yoktu. `PLATFORM_REVENUE` sahipsiz, tekil bir hesap — `id` burada
+ * ledger hesabini degil, yalnizca paranin gidecegi HEDEF adresi belirler.
+ */
+describe('platform cekimi — kind: platform_revenue', () => {
+  const PLATFORM_ADDR = 'carol.testnet'
+
+  function kurPlatform(kazancMicros: bigint) {
+    const ids = () => `id-${++n}`
+    const ledger = new Ledger(new SqliteLedgerStore(db, clock, ids), clock, ids)
+    // Reklamvereni fonla, gosterimi yaz — platform payi otomatik olusuyor
+    // (splitRevenue, ADR-011). %50 pay ile PUB kazancMicros * 2'nin
+    // yarisini, platform da yarisini alir.
+    ledger.deposit({ advertiserId: ADV, amount: micros(kazancMicros * 2n), topupId: `t-${++n}` })
+    ledger.postImpression({
+      impressionId: `i-${++n}`, advertiserId: ADV, publisherId: 'irrelevant-pub', campaignId: 'c1',
+      rate: micros(kazancMicros * 2n), revShareBps: 5000,
+    })
+    const rail = new SahteRail(clock)
+    const loglar: string[] = []
+    const svc = new WithdrawService({
+      clock, ledger, rail, store: new SqlitePayoutStore(db),
+      kind: 'platform_revenue',
+      spendable: () => ledger.balance(PLATFORM_REVENUE),
+      newBatchId: () => `w-${++n}`,
+      log: (m) => loglar.push(m),
+    })
+    return { svc, ledger, rail, loglar }
+  }
+
+  it('biriken platform payi PLATFORM_ADDR\'a cekilir', async () => {
+    const t = kurPlatform(20_000_000n)
+    const r = await t.svc.withdraw(PLATFORM_ADDR, micros(20_000_000n))
+
+    expect(r.ok).toBe(true)
+    expect(t.ledger.balance(PLATFORM_REVENUE)).toBe(0n)
+    expect(t.rail.gonderilen[0]!.items[0]!.address).toBe(PLATFORM_ADDR)
+    expect(t.ledger.audit()).toEqual([])
+  })
+
+  it('balance() teshis metodu dogru hesabi okur — accountId(kind, id) DEGIL', () => {
+    const t = kurPlatform(20_000_000n)
+    expect(t.svc.balance(PLATFORM_ADDR)).toBe(20_000_000n)
+  })
+
+  it('zincirde patlarsa platformun parasi GERI DONER', async () => {
+    const t = kurPlatform(20_000_000n)
+    t.rail.sonuc = 'failed'
+    await t.svc.withdraw(PLATFORM_ADDR, micros(20_000_000n))
+    expect(t.ledger.balance(PLATFORM_REVENUE)).toBe(20_000_000n)
+    expect(t.ledger.audit()).toEqual([])
+  })
+})
+
+/**
+ * Sicak cuzdan yarislari — iki ayri hata, ayni kok: `spendable` kontrolu ile
+ * `payoutSubmit` arasinda ag cagrilari bekleniyordu.
+ */
+describe('yarislar', () => {
+  it('kontrol ile yazma arasinda butce rezerve edilirse cekim REDDEDILIR', async () => {
+    const t = kur(20_000_000n)
+    let spendable = 20_000_000n
+    const svc = new WithdrawService({
+      clock, ledger: t.ledger, rail: t.rail, store: new SqlitePayoutStore(db),
+      kind: 'advertiser',
+      spendable: () => micros(spendable),
+      newBatchId: () => `w-${++n}`,
+      log: () => {},
+    })
+    // `prepare` beklenirken yeni reklamlar teslim edildi ve butceyi rezerve etti.
+    const orijinal = t.rail.prepare.bind(t.rail)
+    t.rail.prepare = async (b) => { spendable = 5_000_000n; return orijinal(b) }
+
+    const r = await svc.withdraw(ADV, micros(20_000_000n))
+
+    expect(r.ok).toBe(false)
+    expect(bakiye(t.ledger), 'defter hic yazilmamali').toBe(20_000_000n)
+    expect(t.ledger.audit()).toEqual([])
+  })
+
+  it('ayni kuyrugu paylasan servisler sicak cuzdani AYNI ANDA kullanmaz', async () => {
+    const t = kur(20_000_000n)
+    let ayniAnda = 0, enFazla = 0
+    const orijinal = t.rail.prepare.bind(t.rail)
+    t.rail.prepare = async (b) => {
+      enFazla = Math.max(enFazla, ++ayniAnda)
+      await new Promise((r) => setTimeout(r, 5))
+      return orijinal(b)
+    }
+    t.rail.reconcile = async (r) => {
+      ayniAnda--
+      return { state: 'settled', txHash: r.txHash, ledger: 1, feeCharged: 100n, opResults: [] }
+    }
+
+    const serial = createSerial()
+    const yap = (id: string) => new WithdrawService({
+      clock, ledger: t.ledger, rail: t.rail, store: new SqlitePayoutStore(db),
+      kind: 'advertiser', spendable: () => micros(20_000_000n),
+      newBatchId: () => `w-${++n}`, log: () => {}, serial,
+    }).withdraw(id, micros(1_000_000n))
+
+    const DIGER = 'globex.testnet'
+    t.ledger.deposit({ advertiserId: DIGER, amount: micros(20_000_000n), topupId: 't-diger' })
+    const sonuclar = await Promise.all([yap(ADV), yap(DIGER), yap(ADV + '')])
+
+    expect(enFazla, 'iki prepare ust uste binmemeli').toBe(1)
+    expect(sonuclar.filter((r) => r.ok).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('kuyrukta bir isin patlamasi sonrakileri durdurmaz', async () => {
+    const serial = createSerial()
+    const a = serial(async () => { throw new Error('boom') })
+    const b = serial(async () => 42)
+    await expect(a).rejects.toThrow('boom')
+    await expect(b).resolves.toBe(42)
+  })
+})
